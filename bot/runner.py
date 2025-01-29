@@ -1,4 +1,4 @@
-# import asyncio
+import asyncio
 import logging
 import os
 import signal
@@ -69,34 +69,46 @@ def bot_runner():
     # https://www.roguelynn.com/words/asyncio-graceful-shutdowns/
     loop = client.loop
 
-    def stop_loop(signal):
-        """Asyncio loop stop on OS signal."""
+    async def service_shutdown(signal):
+        """Service shutdown on OS signal."""
 
         logger.info(
-            f'[ main ]: Received signal {signal.name}, stopping the loop'
+            f'[ main ]: Received signal {signal.name}, stopping the service'
         )
-        loop.stop()
+
+        await handler.shutdown()
+
+        await client.disconnect()
+
+        # Double check
+        if client.is_connected():
+            logger.error('[ main ]: Failed to disconnect client gracefilly')
+            return loop.stop()
+
+        logger.info('[ main ]: Client is disconnected')
 
     if sys.platform != 'win32':
         for s in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-            loop.add_signal_handler(s, lambda s=s: stop_loop(s))
+            loop.add_signal_handler(
+                s, lambda s=s: asyncio.create_task(service_shutdown(s))
+            )
 
     try:
-        # client.loop.run_until_complete(client.disconnected)
-        loop.create_task(client._run_until_disconnected())
+        logger.info('[ main ]: Running main asyncio loop')
+        loop.run_until_complete(client.disconnected)
 
-        logger.info('Running main asyncio loop')
-        loop.run_forever()
+    # In case we're on win platform
     except KeyboardInterrupt:
-        stop_loop(signal.SIGINT)
+        loop.run_until_complete(service_shutdown(signal.SIGINT))
+
     except Exception as exc:
         logger.error(
             'Unhandled exception in main loop: 🟥 '
             f'{exc.__class__.__name__}: {exc}', exc_info=True
         )
     finally:
-        handler.shutdown()
-        client.disconnect()
+        loop.stop()
+        logger.info('[ main ]: Service is down')
 
 
 if __name__ == '__main__':
