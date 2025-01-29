@@ -1,5 +1,7 @@
 import asyncio
 import functools
+import logging
+import sys
 from abc import ABC, abstractmethod
 from contextvars import Context
 from logging import Logger
@@ -18,6 +20,11 @@ class BaseHandler(ABC):
         self.logger = logger
         self._loop = client.loop  # just convinience
 
+        # A sets to keep strong references to background tasks
+        # to prevent its garbage collection
+        self._core_background_tasks = set()
+        self._event_background_tasks = set()
+
     def _log_exception(
         self,
         exc: Exception,
@@ -31,6 +38,44 @@ class BaseHandler(ABC):
                           exc_info=exc_info)
         if propagate:
             raise exc
+
+    def _log_task_cancellation(self, task: asyncio.Task):
+        """Log at DEBUG level if given task was cancelled."""
+
+        if not task.cancelled():
+            return
+
+        self.logger.debug(
+            (
+                f'{task.get_context().run(context.get_task_prefix)} '
+                if sys.version_info.major >= 3 and sys.version_info.minor >= 12
+                else f'[ {task.get_name()} ]: '
+            )
+            + f'{task.get_name()} task cancelled'
+        )
+
+    def create_background_task(self, *args, event_handling: bool = False,
+                               **kwargs):
+        """Wrapper around .create_task to keep strong reference to a task.
+
+        Depending on optional `event_handling` bool kwarg spawned task
+        is put in `self._event_background_tasks`
+        or `self._core_background_tasks` (the default).
+        """
+        task = self._loop.create_task(*args, **kwargs)
+
+        if event_handling:
+            self._event_background_tasks.add(task)
+            task.add_done_callback(self._event_background_tasks.discard)
+        else:
+            self._core_background_tasks.add(task)
+            task.add_done_callback(self._core_background_tasks.discard)
+
+        # Log task cancellation in DEBUG mode
+        if self.logger.getEffectiveLevel() <= logging.DEBUG:
+            task.add_done_callback(self._log_task_cancellation)
+
+        return task
 
     @staticmethod
     def new_context(
@@ -102,15 +147,28 @@ class BaseHandler(ABC):
 
                 return sync_new_context_wrapper
 
+            # Асинхронный декоратор <- старая версия
+            # @functools.wraps(method)
+            # async def async_new_context_wrapper(
+            #     self: BaseHandler, *args, **kwargs
+            # ):
+
+            #     return self._loop.create_task(
+            #         method(self, *args, **kwargs),
+            #         context=build_context_obj(method, self, args, kwargs)
+            #     )
+
             # Асинхронный декоратор
             @functools.wraps(method)
-            async def async_new_context_wrapper(
+            # NB! No async in definition, returning awaitable Task instance
+            def async_new_context_wrapper(
                 self: BaseHandler, *args, **kwargs
             ):
-
-                return self._loop.create_task(
+                return self.create_background_task(
                     method(self, *args, **kwargs),
-                    context=build_context_obj(method, self, args, kwargs)
+                    name=(task_name or method.__name__),
+                    context=build_context_obj(method, self, args, kwargs),
+                    event_handling=event_handling
                 )
 
             return async_new_context_wrapper
