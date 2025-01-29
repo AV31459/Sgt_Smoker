@@ -75,9 +75,10 @@ class SmokerBotHandler(UserdataMixin, ClientMixin, BaseHandler):
         )
 
         # Создание задачи автосохранения данных
-        self._presistence_task = self._loop.create_task(
-            self._persitstence_task()
-        )
+        # self._presistence_task = self._loop.create_task(
+        #     self._persitstence_task()
+        # )
+        self._persitstence_task()  # Decorated as task spawn
 
     @manage_context
     async def _data_check_and_timer_restart(self):
@@ -158,12 +159,23 @@ class SmokerBotHandler(UserdataMixin, ClientMixin, BaseHandler):
         self._save_userdata()
 
         # Пересоздаем задачу
-        self._loop.create_task(self._persitstence_task())
+        # self._loop.create_task(self._persitstence_task())
+        self._persitstence_task()  # Decorated as task spawn
 
     @new_context()
     @manage_context
-    def shutdown(self):
+    async def shutdown(self):
         """Завершение работы хендлера."""
+
+        core_tasks = [
+            task for task in self._core_background_tasks
+            if (task is not asyncio.current_task(self._loop) and task.cancel())
+        ]
+        self.logger.info(
+            f'{context.get_task_prefix()} Cancelling {len(core_tasks)} '
+            'handler\'s core tasks'
+        )
+        await asyncio.gather(*core_tasks, return_exceptions=True)
 
         self._save_userdata()
 
